@@ -57,6 +57,8 @@
 
 # 本 fork 的修改
 
+> **来源声明**：本仓库 fork 自 [newdraw/AppTime](https://github.com/newdraw/AppTime)（作者：newdraw）。原仓库未提供 LICENSE（默认保留所有权利），本仓库的修改仅供个人学习使用；如有版权主张请与原作者联系。请勿删除原作者的署名与致谢。
+
 基于原仓库最新 master（2024-01-23）的稳定性改进：
 
 1. **修复"无限制"选项崩溃**：`RecordScreenDays` 为 int.MaxValue 时不再执行 `AddDays(-int.MaxValue)` 溢出（Recorder.cs）；
