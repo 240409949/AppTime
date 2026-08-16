@@ -3,3 +3,13 @@
 /AppTime/bin
 /AppTime/obj
 *.user
+
+# 隐私数据：使用时生成，不应上传
+/AppTime/data.db
+/AppTime/data.db-journal
+/AppTime/data.db-wal
+/AppTime/data.db-shm
+/AppTime/images/
+/AppTime/icons/
+/AppTime/*.log
+/backup*/

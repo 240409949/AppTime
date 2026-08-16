@@ -234,12 +234,65 @@ namespace AppTime
 
         DB db = DB.Instance;
 
+        /// <summary>
+        /// 无输入多少秒后判定为离开（看视频时画面在变化，不会被误判）。
+        /// </summary>
+        const int AwayIdleSeconds = 5 * 60;
+
+        /// <summary>
+        /// 系统最后输入距现在多少秒。
+        /// </summary>
+        static int GetIdleSeconds()
+        {
+            var info = new WinApi.LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf(typeof(WinApi.LASTINPUTINFO)) };
+            if (WinApi.GetLastInputInfo(ref info))
+            {
+                uint now = unchecked((uint)Environment.TickCount);
+                return (int)((now - info.dwTime) / 1000);
+            }
+            return 0;
+        }
+
+        byte[] lastThumb;
+        /// <summary>
+        /// 判断屏幕画面是否静止（缩小为16x9与上一帧比较）。
+        /// </summary>
+        bool IsScreenStatic(Bitmap img)
+        {
+            using var thumb = new Bitmap(img, 16, 9);
+            var data = new byte[16 * 9];
+            for (int y = 0; y < 9; y++)
+            {
+                for (int x = 0; x < 16; x++)
+                {
+                    var p = thumb.GetPixel(x, y);
+                    data[y * 16 + x] = (byte)((p.R * 30 + p.G * 59 + p.B * 11) / 100);
+                }
+            }
+            if (lastThumb == null)
+            {
+                lastThumb = data;
+                return false;
+            }
+            long diff = 0;
+            for (int i = 0; i < data.Length; i++)
+            {
+                diff += Math.Abs(data[i] - lastThumb[i]);
+            }
+            lastThumb = data;
+            return diff / (double)data.Length < 2.0;
+        }
+
         public void RecorderThreadProc()
         {
             App lastApp = null;
+            bool away = false;
+            var now = DateTime.Now;
             while (true)
             {
-                var now = DateTime.Now; 
+                try
+                {
+                now = DateTime.Now; 
                 var hwnd = WinApi.GetForegroundWindow();
                 var text = new StringBuilder(255);
                 WinApi.GetWindowText(hwnd, text, 255);
@@ -248,35 +301,95 @@ namespace AppTime
                 var process = GetProcess(processid);
                 var appname = process.ProcessName;
 
-                if (lastApp != null)
+                // 离开检测：长时间无输入 且 画面静止（锁屏/黑屏/人离开），看视频画面在动不会误判
+                if (!away && GetIdleSeconds() >= AwayIdleSeconds)
                 {
-                    db.Execute(
-                        "update period set timeend = @v1 where timestart = @v0",
-                        lastApp.TimeStart,
-                        now.AddMilliseconds(-1)//必须减小，否则可能与下个周期开始时间重叠 
-                    );
+                    using var probe = GetScreenSafe();
+                    if (probe == null || IsScreenStatic(probe))
+                    {
+                        away = true;
+                    }
                 }
 
-                if (lastApp == null || lastApp.AppProcess != appname || lastApp.WinText != winText)
+                if (away)
                 {
-                   
-                    var win = GetWin(process, winText);
-                    lastApp = new App { WinId = win.id, AppProcess = appname, TimeStart = now, WinText = winText };
-                    db.Execute(
-                        "insert into [period](winid, timeStart, timeEnd) values(@v0, @v1, @v1)",
-                        win.id, now
-                    ); 
+                    // 离开状态：结束当前周期，不录制
+                    if (lastApp != null)
+                    {
+                        db.Execute(
+                            "update period set timeend = @v1 where timestart = @v0",
+                            lastApp.TimeStart,
+                            now.AddMilliseconds(-1)
+                        );
+                        lastApp = null;
+                    }
+                    if (buffer != null)
+                    {
+                        // 先落盘当前缓冲，避免恢复后帧率计算错乱
+                        FlushScreenBuffer();
+                    }
+                    // 离开结束：用户恢复输入 或 画面重新变化
+                    if (GetIdleSeconds() < AwayIdleSeconds)
+                    {
+                        away = false;
+                    }
+                    else
+                    {
+                        using var probe = GetScreenSafe();
+                        if (probe == null || !IsScreenStatic(probe))
+                        {
+                            away = false;
+                        }
+                    }
                 }
-
-                Screenshot(now);
-
-                //等到下一个周期
-                var nextTime = now.AddMilliseconds(IntervalMs);
-                now = DateTime.Now;
-                if(nextTime > now)
+                else
                 {
-                    Thread.Sleep(nextTime - now);
-                } 
+                    if (lastApp != null)
+                    {
+                        db.Execute(
+                            "update period set timeend = @v1 where timestart = @v0",
+                            lastApp.TimeStart,
+                            now.AddMilliseconds(-1)//必须减小，否则可能与下个周期开始时间重叠 
+                        );
+                    }
+
+                    if (lastApp == null || lastApp.AppProcess != appname || lastApp.WinText != winText)
+                    {
+                        var win = GetWin(process, winText);
+                        lastApp = new App { WinId = win.id, AppProcess = appname, TimeStart = now, WinText = winText };
+                        db.Execute(
+                            "insert into [period](winid, timeStart, timeEnd) values(@v0, @v1, @v1)",
+                            win.id, now
+                        ); 
+                    }
+
+                    Screenshot(now);
+                }
+                }
+                catch (Exception ex)
+                {
+                    // 主循环任何异常都不能带崩进程，记日志后跳过本周期
+                    try
+                    {
+                        File.AppendAllText(
+                            Path.Combine(DataPath, "recorder_error.log"),
+                            $"{DateTime.Now}: {ex}\r\n"
+                        );
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+                finally
+                {
+                    //等到下一个周期
+                    var nextTime = now.AddMilliseconds(IntervalMs);
+                    now = DateTime.Now;
+                    if(nextTime > now)
+                    {
+                        Thread.Sleep(nextTime - now);
+                    } 
+                }
             }
         }
          
@@ -350,7 +463,14 @@ namespace AppTime
                 buffer = new MemoryBuffer(now);
             }
 
-            using var img = GetScreen();
+            using var img = GetScreenSafe();
+            if (img == null)
+            {
+                // 屏幕不可用（如锁屏瞬间、分辨率变为0），跳过本帧
+                return;
+            }
+            // 更新画面基准，供离开检测比较
+            IsScreenStatic(img);
             using var mem = new MemoryStream();
             img.Save(mem, ImageFormat.Jpeg);
             buffer.Frames.Add(new Frame(now - buffer.StartTime, mem.ToArray()));
@@ -368,6 +488,19 @@ namespace AppTime
             var b = buffer;
             buffer = newBuffer;
 
+            // 限制同时保存的缓冲数量，防止ffmpeg保存慢时内存积压（每缓冲约60-180MB）
+            while (true)
+            {
+                lock (flushing)
+                {
+                    if (flushing.Count < 2)
+                    {
+                        break;
+                    }
+                }
+                Thread.Sleep(500);
+            }
+
             //加入flushing
             lock (flushing)
             {
@@ -381,10 +514,30 @@ namespace AppTime
             }
             new Thread(() =>
             {
-                Ffmpeg.Save(getFileName(b.StartTime), b.Frames.ToArray());
-                lock (flushing)
+                try
                 {
-                    flushing.Remove(b);
+                    Ffmpeg.Save(getFileName(b.StartTime), b.Frames.ToArray());
+                }
+                catch (Exception ex)
+                {
+                    // 保存失败（如磁盘满、系统繁忙导致I/O错误）时不能带崩整个进程
+                    try
+                    {
+                        File.AppendAllText(
+                            Path.Combine(DataPath, "save_error.log"),
+                            $"{DateTime.Now}: {ex}\r\n"
+                        );
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+                finally
+                {
+                    lock (flushing)
+                    {
+                        flushing.Remove(b);
+                    }
                 }
             })
             {
@@ -408,22 +561,44 @@ namespace AppTime
 
         public List<MemoryBuffer> flushing = new List<MemoryBuffer>(); 
 
-        Bitmap GetScreen()
+        /// <summary>
+        /// 截取当前焦点所在屏幕。屏幕不可用（锁屏瞬间、分辨率变为0、CopyFromScreen失败）时返回null，不会抛异常或死循环。
+        /// </summary>
+        Bitmap GetScreenSafe()
         {
-            // 获取当前焦点所在的屏幕
-            var screen = Screen.FromHandle(WinApi.GetForegroundWindow());
-            var result = new Bitmap(screen.Bounds.Width, screen.Bounds.Height);
-            using var g = Graphics.FromImage(result);
-            retry:
             try
             {
-                g.CopyFromScreen(screen.Bounds.X, screen.Bounds.Y, 0, 0, screen.Bounds.Size);
+                var screen = Screen.FromHandle(WinApi.GetForegroundWindow());
+                if (screen.Bounds.Width <= 0 || screen.Bounds.Height <= 0)
+                {
+                    screen = Screen.PrimaryScreen;
+                }
+                if (screen == null || screen.Bounds.Width <= 0 || screen.Bounds.Height <= 0)
+                {
+                    return null;
+                }
+
+                var result = new Bitmap(screen.Bounds.Width, screen.Bounds.Height);
+                using var g = Graphics.FromImage(result);
+                for (int i = 0; i < 5; i++)
+                {
+                    try
+                    {
+                        g.CopyFromScreen(screen.Bounds.X, screen.Bounds.Y, 0, 0, screen.Bounds.Size);
+                        return result;
+                    }
+                    catch
+                    {
+                        Thread.Sleep(100);
+                    }
+                }
+                result.Dispose();
+                return null;
             }
-            catch
+            catch (Exception)
             {
-                goto retry;
+                return null;
             }
-            return result;
         }
     }
 }

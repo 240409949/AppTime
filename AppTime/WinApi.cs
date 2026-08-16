@@ -1149,6 +1149,20 @@ public class WinApi
     public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
 
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct LASTINPUTINFO
+    {
+        public uint cbSize;
+        public uint dwTime;
+    }
+
+    /// <summary>
+    /// 获取系统最后输入（键盘/鼠标）的时间，用于判断用户是否离开。
+    /// </summary>
+    [DllImport("user32.dll")]
+    public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+
+
     [DllImport("gdi32.dll")]
     public static extern int SetStretchBltMode(IntPtr hdc, StretchBltMode iStretchMode);
     [DllImport("gdi32.dll")]

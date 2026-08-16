@@ -50,11 +50,28 @@ namespace AppTime
                     var ctx = listener.GetContext();
                     //Debug.WriteLine($"Web Request：{ctx.Request.Url}");
                     //ThreadPool.QueueUserWorkItem（_ => processRequest(ctx, webfolder, controller));
-                    new Thread(() => processRequest(
-                        ctx,
-                        webfolder,
-                        controller)
-                    )
+                    new Thread(() =>
+                    {
+                        try
+                        {
+                            processRequest(ctx, webfolder, controller);
+                        }
+                        catch (Exception ex)
+                        {
+                            // 请求处理异常不能带崩进程
+                            try
+                            {
+                                if (ctx.Response != null)
+                                {
+                                    ctx.Response.StatusCode = 500;
+                                    ctx.Response.Close();
+                                }
+                            }
+                            catch (Exception)
+                            {
+                            }
+                        }
+                    })
                     { IsBackground = true, Name = "WebServer Process Request" }.Start();
                 }
             })

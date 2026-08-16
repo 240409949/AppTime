@@ -55,3 +55,17 @@
 
 7、预置常用标签，常见程序默认标签。
 
+# 本 fork 的修改
+
+基于原仓库最新 master（2024-01-23）的稳定性改进：
+
+1. **修复"无限制"选项崩溃**：`RecordScreenDays` 为 int.MaxValue 时不再执行 `AddDays(-int.MaxValue)` 溢出（Recorder.cs）；
+2. **修复锁屏/睡眠崩溃**：屏幕分辨率变为 0 时 `new Bitmap(0,0)` 抛异常导致进程退出，改为安全截屏（GetScreenSafe），屏幕不可用时跳过该帧；
+3. **离开检测（不录制）**：连续无键盘/鼠标输入 5 分钟且屏幕画面静止（16x9 缩略图逐帧比对，看视频画面在动不会误判）时判定离开，停止录制和计时，恢复输入或画面变化后自动继续（Recorder.cs `AwayIdleSeconds` 可调）；
+4. **进程防崩溃加固**：ffmpeg 保存线程、WebServer 请求线程、录制主循环均加异常保护，任何环节出错只记日志（save_error.log / recorder_error.log）不会带崩整个进程；
+5. **内存控制**：限制同时保存的录屏缓冲数（≤2），防止 ffmpeg 保存慢时内存积压；
+6. **依赖修复**：Newtonsoft.Json 从 12.0.3 升级到 13.0.2，与 packages.config 保持一致，可直接还原编译。
+
+> 隐私说明：本仓库已移除运行时数据（data.db、images/、icons/），程序启动时会自动重建数据库。
+
+
