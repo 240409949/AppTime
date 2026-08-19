@@ -38,24 +38,51 @@ namespace AppTime
         {
             lock (this)
             {
-                conn.Open();
-                using var cmd = conn.CreateCommand();
-                cmd.CommandText = sql;
-                for (var i = 0; i < args.Length; i++)
+                for (var attempt = 0; ; attempt++)
                 {
-                    var arg = args[i];
-                    if (!(arg is DbParameter param))
+                    try
                     {
-                        param = factory.CreateParameter();
-                        param.ParameterName = $"@v{i}";
-                        param.Value = arg;
-                    } 
-                    cmd.Parameters.Add(param);
-                }
+                        if (conn.State != ConnectionState.Open)
+                        {
+                            conn.Open();
+                        }
+                        using var cmd = conn.CreateCommand();
+                        cmd.CommandText = sql;
+                        for (var i = 0; i < args.Length; i++)
+                        {
+                            var arg = args[i];
+                            if (!(arg is DbParameter param))
+                            {
+                                param = factory.CreateParameter();
+                                param.ParameterName = $"@v{i}";
+                                param.Value = arg;
+                            }
+                            cmd.Parameters.Add(param);
+                        }
 
-                var result = handler(cmd);
-                conn.Close();
-                return result;
+                        var result = handler(cmd);
+                        return result;
+                    }
+                    catch
+                    {
+                        try { conn.Close(); } catch { }
+                        if (attempt >= 1)
+                        {
+                            throw;
+                        }
+                        conn = new SQLiteConnection
+                        {
+                            ConnectionString = new SQLiteConnectionStringBuilder
+                            {
+                                DataSource = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "data.db")
+                            }.ToString()
+                        };
+                    }
+                    finally
+                    {
+                        try { conn.Close(); } catch { }
+                    }
+                }
             }
         }
 
