@@ -27,19 +27,79 @@ namespace AppTime
     
         int getColor(string str)
         {
-            return str.GetHashCode(); 
-        } 
+            // GetHashCode 直接当 ARGB 会有接近白色的颜色（或 alpha 过低显得发白），白色时间轴背景上不可见
+            // 统一处理：固定不透明 + 三通道都偏亮的颜色压暗到可见范围
+            var v = unchecked((uint)str.GetHashCode());
+            var r = (byte)(v >> 16);
+            var g = (byte)(v >> 8);
+            var b = (byte)v;
+            var min = Math.Min(r, Math.Min(g, b));
+            if (min > 160)
+            {
+                r = (byte)(40 + r % 160);
+                g = (byte)(40 + g % 160);
+                b = (byte)(40 + b % 160);
+            }
+            return unchecked((int)(0xFF000000u | (uint)r << 16 | (uint)g << 8 | b));
+        }
+
+        static int Argb(byte a, byte r, byte g, byte b)
+        {
+            return unchecked((int)((uint)a << 24 | (uint)r << 16 | (uint)g << 8 | b));
+        }
+
+        // 高区分度调色板：按使用时长排名分配，最常用的应用获得最醒目的颜色
+        static readonly int[] Palette = new[]
+        {
+            Argb(0xFF, 0x4E, 0x79, 0xA7), Argb(0xFF, 0xF2, 0x8E, 0x2B), Argb(0xFF, 0xE1, 0x57, 0x59),
+            Argb(0xFF, 0x59, 0xA1, 0x4F), Argb(0xFF, 0x76, 0xB7, 0xB2), Argb(0xFF, 0xB0, 0x7A, 0xA1),
+            Argb(0xFF, 0xED, 0xC9, 0x48), Argb(0xFF, 0x9C, 0x75, 0x5F), Argb(0xFF, 0xD3, 0x72, 0x95),
+            Argb(0xFF, 0x49, 0x98, 0x94), Argb(0xFF, 0xB6, 0x99, 0x2D), Argb(0xFF, 0x5D, 0x69, 0xB1),
+            Argb(0xFF, 0x2E, 0x6E, 0x8E), Argb(0xFF, 0xCC, 0x4B, 0x44), Argb(0xFF, 0x79, 0x70, 0xB3),
+            Argb(0xFF, 0x34, 0x8C, 0x31)
+        };
 
         static Dictionary<long, int> appColors = new Dictionary<long, int>();
+        static DateTime appColorsTime = DateTime.MinValue;
+        static readonly object appColorsLock = new object();
+
+        /// <summary>
+        /// 按应用总使用时长排名刷新颜色映射（60 秒内不重复计算）。
+        /// </summary>
+        void RefreshAppColors()
+        {
+            lock (appColorsLock)
+            {
+                if ((DateTime.Now - appColorsTime).TotalSeconds < 300)
+                {
+                    return;
+                }
+                var next = new Dictionary<long, int>();
+                var rows = db.ExecuteDynamic(@"
+select app.id id
+from app
+left join win on win.appid = app.id
+left join period p on p.winid = win.id
+group by app.id
+order by ifnull(sum(julianday(p.timeEnd) - julianday(p.timeStart)), 0) desc
+").ToList();
+                for (var i = 0; i < rows.Count; i++)
+                {
+                    next[(long)rows[i].id] = Palette[i % Palette.Length];
+                }
+                appColors = next;
+                appColorsTime = DateTime.Now;
+            }
+        }
 
         int getAppColor(long appId)
         {
-            if(!appColors.TryGetValue(appId, out var color))
-            { 
-                var text = db.ExecuteValue<string>($"select text from app where id={appId}");
-                lock (appColors)
+            if (!appColors.TryGetValue(appId, out var color))
+            {
+                RefreshAppColors();
+                if (!appColors.TryGetValue(appId, out color))
                 {
-                    color = appColors[appId] = getColor(text);
+                    color = Palette[0];
                 }
             }
             return color;
@@ -126,6 +186,30 @@ order by p.timeStart
                     imgdata[x] = view == "app" ? (int)getAppColor(period.appId) : (int)getTagColor(period.tagId);
                 }
             }
+
+            // 叠加离开时段：锁屏=深灰，无输入=浅灰（离开时段本无记录，不影响正常着色）
+            var aways = db.ExecuteDynamic(@"
+select timeStart, timeEnd, reason
+from away
+where 
+    timeStart between @v0 and @v1 
+    or timeEnd between @v0 and @v1
+    or @v0 between timeStart and timeEnd
+",
+            timefrom, timeto
+            );
+            foreach (var a in aways)
+            {
+                var from = Math.Max(0, (int)Math.Round((a.timeStart - timefrom).TotalSeconds / totalsecs * width));
+                object endObj = a.timeEnd;
+                var end = endObj == null || endObj is DBNull ? timeto : (DateTime)endObj;
+                var to = Math.Min(width - 1, (int)Math.Round((end - timefrom).TotalSeconds / totalsecs * width));
+                var color = (int)a.reason == 1 ? Argb(0xFF, 0x78, 0x78, 0x78) : Argb(0xFF, 0xC8, 0xC8, 0xC8);
+                for (var x = from; x <= to; x++)
+                {
+                    imgdata[x] = color;
+                }
+            }
              
             fixed (int* p = &imgdata[0])
             {
@@ -180,6 +264,7 @@ order by days desc
                                 text = i.appText,
                                 time = time.ToString(@"hh\:mm\:ss"),
                                 percent = Math.Round(time.TotalSeconds * 100 / totalSeconds, 2) + "%",
+                                color = getAppColor(i.appId),
                                 children = new object[0]
                             }
                         );
@@ -192,12 +277,13 @@ order by days desc
 select 
 	win.id winId,
 	win.text winText,
-    tag.text tagText,
+    ifnull(tag.text, '(其他)') tagText,
 	sum(julianday(case when timeEnd > @v1 then @v1 else timeEnd end) - 
         julianday(case when timeStart < @v0 then @v0 else timeStart end)) days
 from win
 join period p on p.winid = win.id
-left join tag on tag.id = win.tagId
+join app on app.id = win.appid
+left join tag on tag.id = win.tagId or (win.tagId = 0 and tag.id = app.tagId)
 where 
     win.appId = @v2
     and (
@@ -211,17 +297,40 @@ order by days desc
                 timefrom, timeto, parentKey 
 );
 
+                // 按标签把窗口收进分组行（summary），前端点击可展开查看窗口明细
+                var groups = new List<Group>();
                 foreach (var i in data)
                 {
                     var time = new TimeSpan((long)(i.days * TimeSpan.TicksPerDay));
-                    result.Add(
+                    var g = groups.Find(x => x.text == i.tagText);
+                    if (g == null)
+                    {
+                        g = new Group { text = i.tagText, wins = new List<object>() };
+                        groups.Add(g);
+                    }
+                    g.time += time;
+                    g.wins.Add(
                         new
                         {
                             i.winId,
-                            i.tagText,
                             text = string.IsNullOrWhiteSpace(i.winText) ? "(无标题)" : i.winText,
                             time = time.ToString(@"hh\:mm\:ss"),
                             percent = Math.Round(time.TotalSeconds * 100 / totalSeconds, 2) + "%"
+                        }
+                    );
+                }
+
+                foreach (var g in groups.OrderByDescending(x => x.time))
+                {
+                    result.Add(
+                        new
+                        {
+                            text = g.text,
+                            summary = true,
+                            expanded = false,
+                            time = g.time.ToString(@"hh\:mm\:ss"),
+                            percent = Math.Round(g.time.TotalSeconds * 100 / totalSeconds, 2) + "%",
+                            children = g.wins
                         }
                     );
                 }
@@ -262,7 +371,8 @@ order by days desc
                             i.tagId,
                             i.tagText,
                             time = time.ToString(@"hh\:mm\:ss"),
-                            percent = Math.Round(time.TotalSeconds * 100 / totalSeconds, 2) + "%"
+                            percent = Math.Round(time.TotalSeconds * 100 / totalSeconds, 2) + "%",
+                            color = getTagColor(i.tagId)
                         }
                     );
                 }
@@ -311,6 +421,16 @@ order by days desc
         }
  
         /// <summary>
+        /// 窗口按标签分组行（app 视图二级）
+        /// </summary>
+        class Group
+        {
+            public string text;
+            public TimeSpan time;
+            public List<object> wins;
+        }
+
+        /// <summary>
         /// 时间
         /// </summary>
         public class TimeInfo
@@ -357,7 +477,26 @@ limit 1",
 
             if (data == null)
             {
-                return null;
+                // 无使用记录时检查离开时段
+                var a = db.ExecuteDynamic(@"
+SELECT timeStart, reason
+from away
+where @v0 between timeStart and ifnull(timeEnd, '9999-12-31 23:59:59')
+limit 1",
+                   time
+               ).FirstOrDefault();
+                if (a == null)
+                {
+                    return null;
+                }
+                return new TimeInfo
+                {
+                    timeSrc = time,
+                    timeStart = a.timeStart,
+                    app = (int)a.reason == 1 ? "锁屏中" : "离开（无输入）",
+                    title = "",
+                    appId = 0
+                };
             }
               
             return new TimeInfo
@@ -552,6 +691,9 @@ limit 1",
             db.Execute($"update app set tagId=0 where tagId={tagId}");
             db.Execute($"update win set tagId=0 where tagId={tagId}");
 
+            // 级联删除该标签的收录规则
+            db.Execute($"delete from rule where tagId={tagId}");
+
         }
 
         public void clearAppTag(long appId)
@@ -618,6 +760,73 @@ select * from win where tagId = @tagId
             );
         }
          
+        #endregion
+
+        #region rule
+
+        public DataTable getRules()
+        {
+            return db.ExecuteTable(@"
+select rule.id, rule.pattern, rule.tagId, tag.text tagText
+from rule
+left join tag on tag.id = rule.tagId
+order by rule.id");
+        }
+
+        public bool addRule(string pattern, long tagId)
+        {
+            if (db.ExecuteValue<bool>(
+                "select exists(select * from rule where pattern = @pattern)",
+                new SQLiteParameter("pattern", pattern)
+            ))
+            {
+                return false;
+            }
+
+            db.Execute(
+                "insert into rule (id, pattern, tagId) values(@id, @pattern, @tagId)",
+                new SQLiteParameter("id", (long)db.ExecuteData("select ifnull(max(id), 0) + 1 from rule")[0][0]),
+                new SQLiteParameter("pattern", pattern),
+                new SQLiteParameter("tagId", tagId)
+            );
+            return true;
+        }
+
+        public void removeRule(long ruleId)
+        {
+            db.Execute(
+                "delete from rule where id = @id",
+                new SQLiteParameter("id", ruleId)
+            );
+        }
+
+        /// <summary>
+        /// 按规则重刷全部历史窗口的分组，返回更新的窗口数（只影响未分组的窗口）。
+        /// </summary>
+        public int applyRules()
+        {
+            var count = 0;
+            var rules = db.ExecuteDynamic("select pattern, tagId from rule").ToList();
+            if (rules.Count == 0)
+            {
+                return 0;
+            }
+            var wins = db.ExecuteDynamic("select id, text from win where tagId = 0").ToList();
+            foreach (var w in wins)
+            {
+                foreach (var r in rules)
+                {
+                    if (((string)w.text).Contains((string)r.pattern))
+                    {
+                        db.Execute($"update win set tagId={r.tagId} where id={w.id}");
+                        count++;
+                        break;
+                    }
+                }
+            }
+            return count;
+        }
+
         #endregion
     }
 }

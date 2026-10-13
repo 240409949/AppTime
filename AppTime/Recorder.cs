@@ -210,11 +210,18 @@ namespace AppTime
                 {
                     nextWinId = (int)(long)db.ExecuteData("select ifnull(max(id),0) + 1 from win")[0][0];
                 }
+                // 分组规则：窗口标题包含 pattern 时自动归入对应标签
+                var ruleRows = db.ExecuteData(
+                    "select tagId from rule where @winText like '%' || pattern || '%' limit 1",
+                    new SQLiteParameter("winText", winText)
+                );
+                var ruleTagId = ruleRows.Count > 0 ? (long)ruleRows[0][0] : 0;
                 db.Execute(
-                    "insert into win (id, appId, text) values(@id, @appId, @text)",
+                    "insert into win (id, appId, text, tagId) values(@id, @appId, @text, @tagId)",
                     new SQLiteParameter("id", nextWinId),
                     new SQLiteParameter("appId", app.id),
-                    new SQLiteParameter("text", winText)
+                    new SQLiteParameter("text", winText),
+                    new SQLiteParameter("tagId", ruleTagId)
                 );
                 win = new win { id = nextWinId, text = winText };
                 nextWinId++;
@@ -226,6 +233,19 @@ namespace AppTime
                     id = data.id,
                     text = winText
                 };
+                // 已存在的窗口若未分组，补做规则归组
+                var existTagId = (long)db.ExecuteData($"select tagId from win where id={data.id}")[0][0];
+                if (existTagId == 0)
+                {
+                    var ruleRows = db.ExecuteData(
+                        "select tagId from rule where @winText like '%' || pattern || '%' limit 1",
+                        new SQLiteParameter("winText", winText)
+                    );
+                    if (ruleRows.Count > 0)
+                    {
+                        db.Execute($"update win set tagId={(long)ruleRows[0][0]} where id={data.id}");
+                    }
+                }
             }
 
             app.wins.Add(winText, win);
@@ -287,6 +307,8 @@ namespace AppTime
         {
             App lastApp = null;
             bool away = false;
+            var awayStart = DateTime.Now;
+            var awayReason = 0; // 0=无输入 1=锁屏
             var now = DateTime.Now;
             while (true)
             {
@@ -308,6 +330,12 @@ namespace AppTime
                     if (probe == null || IsScreenStatic(probe))
                     {
                         away = true;
+                        awayStart = now;
+                        awayReason = WinApi.IsWorkstationLocked() ? 1 : 0;
+                        db.Execute(
+                            "insert into away(timeStart, timeEnd, reason) values(@v0, null, @v1)",
+                            awayStart, awayReason
+                        );
                     }
                 }
 
@@ -332,6 +360,10 @@ namespace AppTime
                     if (GetIdleSeconds() < AwayIdleSeconds)
                     {
                         away = false;
+                        db.Execute(
+                            "update away set timeEnd = @v1 where timeStart = @v0 and timeEnd is null",
+                            awayStart, now
+                        );
                     }
                     else
                     {
@@ -339,6 +371,10 @@ namespace AppTime
                         if (probe == null || !IsScreenStatic(probe))
                         {
                             away = false;
+                            db.Execute(
+                                "update away set timeEnd = @v1 where timeStart = @v0 and timeEnd is null",
+                                awayStart, now
+                            );
                         }
                     }
                 }

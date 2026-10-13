@@ -136,9 +136,11 @@
             <span class="app" style="float:right"></span>
             <img class="icon" />
         </div>
-        <div id="bar">
-            <canvas id="scale" style="height:100px"></canvas> 
+        <div id="bar" style="position:relative">
+            <canvas id="scale" style="height:100px"></canvas>
+            <div id="cursorline" style="position:absolute;top:0;bottom:0;width:1px;background:#e00;display:none;pointer-events:none"></div>
         </div>
+        <div id="legend" style="padding:2px 0;font-size:12px;line-height:18px;color:#666"></div>
     </div>
     <div data-options="region:'east',border:false,split:true" style="border-left: 1px solid #ddd;width:350px">
         <div id="tree" class="datatable" style="width:100%;height:100%" >
@@ -152,6 +154,7 @@
                             <div class="text" :title="parent.text">
                                 <i v-if="!parent.expanded" class="fas fa-angle-right" @click="expand(parent)"></i>
                                 <i v-else class="fas fa-angle-down" @click="collapse(parent)"></i>
+                                <i class="appcolor" :style="{ background: colorCss(parent.color) }"></i>
                                 <img :src="makeDataUrl('getIcon', [parent.appId, false])" v-if="parent.appId" />
                                 {{parent.text}}
                                 <span class="tag" v-if="parent.tagText" v-text="parent.tagText"></span>
@@ -160,16 +163,29 @@
                         <td>{{parent.time}}</td>
                         <td>{{parent.percent}}</td>
                     </tr>
-                    <tr class="child" v-for="child in parent.children" @mouseenter="mouseenter(child)">
+                    <template v-for="child in parent.children">
+                    <tr class="child" :class="{ summary: child.summary, other: !child.winId && !child.summary }" @mouseenter="mouseenter(child)" @click="child.summary && toggleGroup(child)">
                         <td>
                             <div class="text" :title="child.text">
+                                <i v-if="child.summary" :class="child.expanded ? 'fas fa-angle-down' : 'fas fa-angle-right'" class="group-toggle"></i>
                                 {{child.text}}
                                 <span class="tag" v-if="child.tagText" v-text="child.tagText"></span>
                             </div>
-                        </td> 
+                        </td>
                         <td>{{child.time}}</td>
                         <td>{{child.percent}}</td>
                     </tr>
+                    <tr class="child grandchild" v-if="child.summary && child.expanded" v-for="g in child.children" @mouseenter="mouseenter(g)">
+                        <td>
+                            <div class="text" :title="g.text">
+                                {{g.text}}
+                                <span class="tag" v-if="g.tagText" v-text="g.tagText"></span>
+                            </div>
+                        </td>
+                        <td>{{g.time}}</td>
+                        <td>{{g.percent}}</td>
+                    </tr>
+                    </template>
                 </tbody>
             </table>
         </div>
@@ -349,6 +365,7 @@
         else {
             timeCursor = timeFrom.clone().add(event.offsetX / scale.width * totalsecs, "seconds");
         }
+        $('#cursorline').show().css('left', event.offsetX + 'px');
 
         invoke("getTimeInfo", [timeCursor.format(format)], function (info) {
             lastRequest = false;
@@ -511,6 +528,11 @@
                             'getTree',
                             [timeFrom.format(format), timeTo.format(format), currentView, v.appId ? v.appId : v.tagId],
                             function (children) {
+                                var oldMap = {};
+                                $.each(old.children || [], function (j, c) { oldMap[c.text] = c.expanded; });
+                                $.each(children, function (j, c) {
+                                    c.expanded = c.summary ? (oldMap[c.text] || false) : false;
+                                });
                                 v.children = children;
                             }
                         );
@@ -523,13 +545,35 @@
             });
 
             vueData.tree = data;
+
+            // 刷新颜色图例：当前视口内按时长排序的前 12 项
+            var legend = $('#legend').empty();
+            $.each(data.slice(0, 12), function (i, v) {
+                if (i) {
+                    legend.append(document.createTextNode('  '));
+                }
+                var c = v.color;
+                var cssColor = c === undefined || c === null ? '#ccc'
+                    : 'rgba(' + ((c >>> 16) & 0xFF) + ',' + ((c >>> 8) & 0xFF) + ',' + (c & 0xFF) + ',' + ((c >>> 24) / 255) + ')';
+                legend.append(
+                    $('<span>').css({ display: 'inline-block', width: 12, height: 12, background: cssColor, margin: '0 4px -2px 0', borderRadius: 2 })
+                );
+                legend.append($('<span>').text(v.text));
+            });
+            if (data.length > 12) {
+                legend.append(document.createTextNode('  …'));
+            }
         });
 
     }
 
+    bar.on('mouseleave', function () {
+        $('#cursorline').hide();
+    });
+
     var columnTextCss = toArray(document.styleSheets)
         .where(i => i.href == null)
-        .unionAll(i => i.cssRules)
+        .unionAll(i => { try { return i.cssRules; } catch (e) { return []; } })
         .where(i => i.selectorText == '.tree .text')
         .first();
 
@@ -546,7 +590,9 @@
     }
 
     function onResize() {
-        columnTextCss.style.width = (east.width() - 170) + 'px';
+        if (columnTextCss) {
+            columnTextCss.style.width = (east.width() - 170) + 'px';
+        }
         scale.width = scale.clientWidth;
         scale.height = scale.clientHeight;
         relocateLoadingImage();
@@ -590,6 +636,15 @@
             el: '#tree',
             data: vueData,
             methods: {
+                colorCss: function (c) {
+                    if (c === undefined || c === null) { return 'transparent'; }
+                    var v = c >>> 0;
+                    var a = (v >>> 24) & 0xFF;
+                    var r = (v >>> 16) & 0xFF;
+                    var g = (v >>> 8) & 0xFF;
+                    var b = v & 0xFF;
+                    return 'rgba(' + r + ',' + g + ',' + b + ',' + (a / 255) + ')';
+                },
                 expand: function (parent) {
                     parent.expanded = true; 
                     invoke(
@@ -606,8 +661,11 @@
                     parent.children = [];
                     refresh();
                 },
+                toggleGroup: function (child) {
+                    child.expanded = !child.expanded;
+                },
                 mouseenter: function (item) { 
-                    if ('tagId' in item) {
+                    if ('tagId' in item || item.summary) {
                         btnTagMenu.hide();
                         return;
                     }
@@ -648,16 +706,27 @@
      data-options="iconCls: 'fas fa-tag', toolbar:'#dlgTagToolbar',closed:true">
     <div id="dlgTagToolbar" style="padding:2px 0">
         <a href="javascript:addTag()" class="easyui-linkbutton" data-options="iconCls:'fas fa-plus',plain:true">添加</a>
+        <a href="javascript:applyRules()" class="easyui-linkbutton" data-options="iconCls:'fas fa-sync',plain:true">按规则重刷历史</a>
     </div>
     <table class="datatable tags" cellspacing="0" cellpadding="0">
         <tr v-for="i in tags">
-            <td v-text="i.text"></td>
+            <td>
+                <div v-text="i.text"></div>
+                <div class="tagrules" v-if="i.rules.length">
+                    <span class="ruleitem" v-for="r in i.rules">
+                        收录：标题包含"{{r.pattern}}"
+                        <i class="fas fa-times" @click="removeRule(r.id)"></i>
+                    </span>
+                </div>
+                <div class="tagrules norule" v-else>未设置收录规则</div>
+            </td>
             <td class="buttons" style="text-align:right;color:#aaa">
+                <i style="cursor:pointer;" class="fas fa-plus" title="添加收录规则" @click="addTagRule(i)"></i>
                 <i style="cursor:pointer;" class="fas fa-pen" @click="renameTag(i.id, i.text)"></i>
                 <i style="cursor:pointer;" class="far fa-trash-alt" @click="removeTag(i.id)"></i>
             </td>
         </tr>
-    </table> 
+    </table>
 </div>
 
 <script>
@@ -670,6 +739,23 @@
         el: '.tags',
         data: vueDataTags,
         methods: {
+            addTagRule: function (tag) {
+                $.messager.prompt(' ', '收录规则：窗口标题包含该关键词时，自动归入标签"' + tag.text + '"', function (pattern) {
+                    if (pattern) {
+                        invoke('addRule', [pattern, tag.id], function (ok) {
+                            if (!ok) {
+                                $.messager.alert('', '该关键词的规则已经存在', 'info');
+                            }
+                            else {
+                                refreshTags();
+                            }
+                        });
+                    }
+                });
+            },
+            removeRule: function (ruleId) {
+                invoke('removeRule', [ruleId], refreshTags);
+            },
             renameTag: function (tagId, oldText) { 
                 $.messager.prompt(' ', '请输入新标签名', function (newText) {
                     if (newText) {
@@ -712,7 +798,11 @@
     var menuTagAs;
     function refreshTags(callback) {
         invoke('getTags', [], function (data) {
-            vueDataTags.tags = data;
+            invoke('getRules', [], function (rules) {
+                $.each(data, function (i, t) {
+                    t.rules = $.grep(rules, function (r) { return r.tagId == t.id; });
+                });
+                vueDataTags.tags = data;
 
             //移除原标记为
             if (!menuTagAs) {
@@ -744,7 +834,8 @@
                 });
             });
             
-            callback && callback(data);
+                callback && callback(data);
+            });
         });
     }
 
@@ -764,3 +855,86 @@
     }
 
 </script>
+
+<style>
+    .tree .appcolor
+    {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        margin-right: 6px;
+        border-radius: 2px;
+    }
+
+    .tree .tag
+    {
+        font-size: 11px;
+        color: #999;
+        border: 1px solid #ddd;
+        border-radius: 3px;
+        padding: 0 4px;
+        margin-left: 6px;
+    }
+
+    .tree .child .text
+    {
+        padding-left: 22px;
+    }
+
+    .tree .grandchild .text
+    {
+        padding-left: 44px;
+        color: #666;
+    }
+
+    .tree .summary
+    {
+        background: #fafafa;
+    }
+
+    .tree .summary .text
+    {
+        font-weight: bold;
+    }
+
+    .tree .group-toggle
+    {
+        cursor: pointer;
+        margin-right: 4px;
+        color: #999;
+    }
+
+    .tree .other .text
+    {
+        color: #999;
+    }
+
+    .tags .tagrules
+    {
+        font-size: 12px;
+        color: #999;
+        padding-top: 3px;
+    }
+
+    .tags .ruleitem
+    {
+        margin-right: 12px;
+    }
+
+    .tags .ruleitem .fas
+    {
+        cursor: pointer;
+        color: #bbb;
+    }
+
+    .tags .ruleitem .fas:hover
+    {
+        color: #e66;
+    }
+
+    .tags .norule
+    {
+        color: #ccc;
+        font-style: italic;
+    }
+</style>

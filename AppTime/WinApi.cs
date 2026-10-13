@@ -1162,6 +1162,26 @@ public class WinApi
     [DllImport("user32.dll")]
     public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
 
+    [DllImport("user32.dll")]
+    public static extern IntPtr OpenInputDesktop(uint dwFlags, bool fInherit, uint dwDesiredAccess);
+
+    [DllImport("user32.dll")]
+    public static extern bool CloseDesktop(IntPtr hDesktop);
+
+    /// <summary>
+    /// 判断当前工作站是否处于锁屏状态（锁屏时无法打开输入桌面）。
+    /// </summary>
+    public static bool IsWorkstationLocked()
+    {
+        var h = OpenInputDesktop(0, false, 0x1000 /*DESKTOP_READOBJECTS*/);
+        if (h == IntPtr.Zero)
+        {
+            return true;
+        }
+        CloseDesktop(h);
+        return false;
+    }
+
 
     [DllImport("gdi32.dll")]
     public static extern int SetStretchBltMode(IntPtr hdc, StretchBltMode iStretchMode);
