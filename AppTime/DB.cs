@@ -26,8 +26,8 @@ namespace AppTime
             var connectionString = new SQLiteConnectionStringBuilder()
             {
                  DataSource= Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "data.db"),
-                 // WAL 模式：读写不互斥，避免录制线程高频写入时查询被阻塞
-                 JournalMode = SQLiteJournalModeEnum.Wal,
+                 // 显式 delete 日志模式：多线程并发开连接时 journal_mode 切换会互相死等（WAL 模式在每请求一线程下不可用）
+                 JournalMode = SQLiteJournalModeEnum.Delete,
                  BusyTimeout = 5000
             }.ToString();
             conn =  new SQLiteConnection
@@ -77,7 +77,7 @@ namespace AppTime
                             ConnectionString = new SQLiteConnectionStringBuilder
                             {
                                 DataSource = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "data.db"),
-                                JournalMode = SQLiteJournalModeEnum.Wal,
+                                JournalMode = SQLiteJournalModeEnum.Delete,
                                 BusyTimeout = 5000
                             }.ToString()
                         };

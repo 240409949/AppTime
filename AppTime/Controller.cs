@@ -75,17 +75,26 @@ namespace AppTime
                     return;
                 }
                 var next = new Dictionary<long, int>();
-                var rows = db.ExecuteDynamic(@"
-select app.id id
-from app
-left join win on win.appid = app.id
-left join period p on p.winid = win.id
-group by app.id
-order by ifnull(sum(julianday(p.timeEnd) - julianday(p.timeStart)), 0) desc
-").ToList();
-                for (var i = 0; i < rows.Count; i++)
+                // 按 period 记录数近似使用热度（行数与使用时长强相关）。
+                // 不用 julianday 全表聚合：该查询在 System.Data.SQLite 下会挂死（python 直连 159ms 正常），持有 DB 锁导致全部请求阻塞
+                var rows = db.ExecuteData(@"
+select win.appid, count(*) c
+from period p
+join win on win.id = p.winid
+group by win.appid
+order by c desc
+");
+                foreach (var r in rows)
                 {
-                    next[(long)rows[i].id] = Palette[i % Palette.Length];
+                    next[(long)r[0]] = Palette[next.Count % Palette.Length];
+                }
+                var allApps = db.ExecuteColumn<long>("select id from app");
+                foreach (var id in allApps)
+                {
+                    if (!next.ContainsKey(id))
+                    {
+                        next[id] = Palette[0];
+                    }
                 }
                 appColors = next;
                 appColorsTime = DateTime.Now;

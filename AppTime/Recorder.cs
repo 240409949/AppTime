@@ -368,7 +368,8 @@ namespace AppTime
                     else
                     {
                         using var probe = GetScreenSafe();
-                        if (probe == null || !IsScreenStatic(probe))
+                        // 锁屏/黑屏时截屏为 null：视为仍在离开，不能当成画面变化误判恢复（否则会反复进出产生大量碎片记录）
+                        if (probe != null && !IsScreenStatic(probe))
                         {
                             away = false;
                             db.Execute(
